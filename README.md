@@ -71,6 +71,13 @@ python -B examples/vault_api_demo/run_demo.py
 
 ### Installation
 
+#### 0. Full VeriHunt Suite via VeriPilot (Recommended — One-Command Install)
+Install `VeriPilot` + `VeriPR` + `VeriHunt` + `VeriSec` + `VeriPerf` together across 6 agent platforms:
+```bash
+git clone https://github.com/lufus4826-eng/veripilot.git ~/.gemini/config/skills/veripilot
+python ~/.gemini/config/skills/veripilot/scripts/vpilot.py install --platform antigravity   # or --platform claude | --platform all
+```
+
 #### 1. Claude Code
 ```bash
 # User-global installation (Recommended)
@@ -209,6 +216,8 @@ verisec/
 ## VeriHunt Ecosystem
 
 VeriSec is part of the **VeriHunt Ecosystem**, sharing the `.bughunt/` isolation convention and empirical Dual-Gate philosophy:
+- **[VeriPilot (VeriHunt Suite)](https://github.com/lufus4826-eng/veripilot):** Smart Router, Cumulative Overlay Orchestrator & One-Command Suite Installer (AI Coding Agent Skills Orchestrator).
+- **[VeriPR](https://github.com/lufus4826-eng/veripr):** Daily 1–2 minute pre-commit & PR differential verification (1-hop caller `impact-map`, `Base` vs. `Head` worktree checks, recursive `schema_hash`).
 - **[VeriHunt](https://github.com/lufus4826-eng/verihunt):** General correctness, edge-case, and concurrency defect hunting (`FAIL` -> `PASS` in `sandbox-fix`).
 - **[VeriPerf](https://github.com/lufus4826-eng/veriperf):** Statistical profiling (`p50`/`p95`, Peak Memory, `ABBA` interleaving, `>= 15%` speedup Dual Gate).
 - **[VeriSec](https://github.com/lufus4826-eng/verisec):** Business-logic & authorization security auditing (`surface-map`, 100% network-isolated PoCs, secret redaction, Dual-Gate remediation verification).
