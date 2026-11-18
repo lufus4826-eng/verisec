@@ -10,12 +10,12 @@ Goal: Find business-logic and authorization vulnerabilities **empirically proven
 **Supreme Principle (Dual-Gate Architecture):** Every vulnerability and patch MUST pass **both** gates:
 1. **Gate 1 — Invariant Breach Gate (`isolated-poc --phase baseline`):**
    - **Authorized Control Pass:** A legitimate authorized request (`test_control_*`) MUST succeed (`PASS`), proving the route and harness work.
-   - **Unauthorized / Boundary Breach Proven:** Cross-account, unauthenticated, mass-assigned, or concurrent request breaches the security boundary (`BREACH_CONFIRMED`) on unpatched code. If unpatched code already blocks the breach (`BREACH_BLOCKED`), classify as `REFUTED_SAFE` (never a false positive).
-   - **Zero Harness/Network Breakdown:** Zero `SyntaxError`/`ImportError`/`VERISEC_NET_GUARD` errors and `ran > 0`.
+   - **Unauthorized / Boundary Breach Proven:** Cross-account, unauthenticated, mass-assigned, or concurrent request breaches the security boundary (`BREACH_CONFIRMED`) on unpatched code — either via `VERISEC_POC:` JSON (`"breach_detected":true`) or via a test failure explicitly tagged with `VERISEC_BREACH_PROVEN` (unmarked generic test errors are flagged `HARNESS_BROKEN` to prevent false breach claims). If unpatched code already blocks the breach (`BREACH_BLOCKED`), classify as `REFUTED_SAFE` (never a false positive).
+   - **Zero Harness/Network Breakdown:** Zero `SyntaxError`/`ImportError`/`VERISEC_NET_GUARD` errors (enforced in both Python and Node.js) and `ran > 0`.
 2. **Gate 2 — Remediation & Non-Regression Gate (`verify` on `S/sandbox-fix/`):**
    - **Breach Blocked:** The exact same PoC confirms the unauthorized action is blocked (`BREACH_BLOCKED`).
-   - **100% Functional Preservation:** Both the PoC's `Authorized Control` case AND the existing project test suite (`--test-cmd`) pass 100%. Overly strict patches that break authorized users (`REJECTED_CONTROL_BROKEN`) or tests (`REJECTED_TEST_REGRESSION`) are **auto-rolled back** via `--auto-rollback`.
-   - **Zero Secret Leakage:** All logs, diffs, worklogs, and report tables are automatically scrubbed via `redact-output` (`unredacted_remaining=0`).
+   - **100% Functional Preservation:** Both the PoC's `Authorized Control` case AND the existing project test suite (`--test-cmd`) pass 100%. Overly strict patches (`REJECTED_CONTROL_BROKEN`), test regressions (`REJECTED_TEST_REGRESSION`), or unsafe in-memory locks added to DB/cache-backed race handlers (`REJECTED_IN_MEMORY_LOCK_ON_DB`) are **auto-rolled back** via `--auto-rollback`.
+   - **Zero Secret Leakage:** All logs, diffs, worklogs, and report tables scrub raw, Base64-encoded, URL-encoded, and registered canary secrets (`redact-output --register-secret`, `unredacted_remaining=0`).
 
 ## Default Parameters
 `MIN_ROUNDS=3` (checkpoint after Round 3; continuation up to `MAX_ROUNDS=8`) | `ISOLATION=100% offline (VERISEC_NET_GUARD)` | `S=.bughunt/sec-<YYYYMMDD-HHMMSS>/` | `VS=<skill_dir>/scripts/vs.py` | **Language:** Auto-match user prompt language (Thai or English; keep standard security terms like *IDOR*, *BOLA*, *Mass Assignment*, *Race Condition*, *PoC*, *Dual Gate* in English) for chat, `S/worklog.md`, Phase 5 prompt, and `S/sec-report.md`.

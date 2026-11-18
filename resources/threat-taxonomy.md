@@ -40,4 +40,6 @@ Load during **Phase 2**. Focus on logic defects static grep/SAST tools miss, pai
 - **PoC Design:**
   - *Authorized Control:* Single authorized redemption on a 1-use voucher succeeds (`+amount`, `remaining_uses == 0`), and a second sequential call fails.
   - *Breach Invariant:* Launch `N=8` concurrent threads/tasks synchronized at a `threading.Barrier(N)` (or `Promise.all` / `sync.WaitGroup`) targeting a 1-use voucher or balance `100` with `N` concurrent `100` withdrawals -> assert `success_count == 1` and `final_balance >= 0`. Unpatched code allows multiple successes -> `BREACH_CONFIRMED`.
-- **Minimal Remediation:** Wrap check-and-mutate inside a `threading.Lock()` / DB transaction with row lock / atomic `UPDATE ... WHERE remaining_uses > 0`.
+- **Minimal Remediation (Iron Rule):**
+  - **Pure In-Memory Single-Process Stores:** Wrap check-and-mutate inside a `threading.Lock()` / mutex.
+  - **Database / ORM / Redis-Backed Handlers (MANDATORY):** **NEVER** use an in-memory `threading.Lock()`, `asyncio.Lock()`, or `sync.Mutex` on handlers backed by SQL/NoSQL/Redis — that fails across multi-worker processes and Gate 2 automatically rejects it as `REJECTED_IN_MEMORY_LOCK_ON_DB`! Always remediate DB/cache races using **atomic conditional updates** (`UPDATE vouchers SET remaining_uses = remaining_uses - 1 WHERE code = ? AND remaining_uses > 0` checking `rowcount == 1`), `SELECT ... FOR UPDATE` inside a transaction, or Redis `SET NX` / Lua CAS scripts.

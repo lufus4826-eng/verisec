@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Deterministic Business-Logic Security & Dual-Gate CLI Engine for VeriSec v1.0 (stdlib only).
+"""Deterministic Business-Logic Security & Dual-Gate CLI Engine for VeriSec v1.1 (stdlib only).
 
 Subcommands:
-  init            Initialize .bughunt/sec-<ts>/ session, network guard, fs-before.txt, worklog.md
+  init            Initialize .bughunt/sec-<ts>/ session, Python+Node netguards, fs-before.txt, worklog.md
   surface-map     Scan API routes/handlers, auth guards, external inputs, and 4 risk categories
   isolated-poc    Run PoC/test script with 100% outbound network isolation + secret redaction
-  redact-output   Scrub keys, passwords, JWTs, and Bearer tokens from text/files/session logs
+  redact-output   Scrub raw/Base64/URL-encoded secrets, tokens & registered session secrets
   verify          Enforce Gate 1 (Invariant Breach) & Gate 2 (Remediation + Non-Regression + Rollback)
   sandbox         Manage S/sandbox-fix, per-target checkpoints, redacted diff, and cleanliness check
   log             Update worklog.md Status line + append redacted 1-line entries atomically
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import difflib
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import urllib.parse
 
 
 IGNORED_SCAN_DIRS = frozenset(
@@ -118,6 +120,7 @@ BINARY_EXTS = frozenset(
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 POC_PREFIX = "VERISEC_POC:"
+BREACH_PROOF_MARKER = "VERISEC_BREACH_PROVEN"
 
 CONTROL_TEST_RE = re.compile(
     r"^(?:test_?|test(?=[A-Z])|Test[A-Za-z0-9_]*_?)?[Cc]ontrol(?:[^a-zA-Z]|$|(?=[A-Z]))"
@@ -217,12 +220,49 @@ _REDACT_RULES: Tuple[Tuple[re.Pattern[str], Any], ...] = (
 )
 
 
-def redact_secrets(text: str) -> Tuple[str, int]:
-    """Mask keys, passwords, JWTs, Bearer tokens, and connection secrets deterministically."""
-    if not text:
-        return text, 0
+_B64_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_-])([A-Za-z0-9+/]{20,}={0,2}|[A-Za-z0-9_-]{20,}={0,2})(?![A-Za-z0-9+/=_-])"
+)
+_URLENC_CANDIDATE_RE = re.compile(r"[^\s\"'<>|=]{6,}|(?<==)[^\s\"'<>|]{6,}")
+
+
+def _load_registered_secrets(s_dir: Optional[Path]) -> List[str]:
+    if not s_dir:
+        return []
+    reg_file = s_dir / "tmp" / ".registered_secrets.json"
+    if not reg_file.is_file():
+        return []
+    try:
+        items = json.loads(reg_file.read_text(encoding="utf-8"))
+        if isinstance(items, list):
+            return [str(x) for x in items if isinstance(x, str) and len(x) >= 6]
+    except Exception:
+        pass
+    return []
+
+
+def _save_registered_secrets(s_dir: Path, values: Sequence[str]) -> int:
+    tmp_dir = s_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    reg_file = tmp_dir / ".registered_secrets.json"
+    existing = set(_load_registered_secrets(s_dir))
+    for val in values:
+        if val and len(val) >= 6:
+            existing.add(val)
+    reg_file.write_text(json.dumps(sorted(existing), indent=2, ensure_ascii=False), encoding="utf-8")
+    return len(existing)
+
+
+def _redact_raw_only(text: str, extra_secrets: Optional[Sequence[str]] = None) -> Tuple[str, int]:
+    """Run raw registered-secret and regex redactions without Base64/URL decoding."""
     total = 0
     out = text
+    if extra_secrets:
+        for sec in sorted({s for s in extra_secrets if len(s) >= 6}, key=len, reverse=True):
+            if sec in out:
+                cnt = out.count(sec)
+                out = out.replace(sec, "[REDACTED_CUSTOM_SECRET]")
+                total += cnt
     for pattern, repl in _REDACT_RULES:
         def _wrap(match: re.Match[str], fn: Any = repl) -> str:
             nonlocal total
@@ -235,19 +275,82 @@ def redact_secrets(text: str) -> Tuple[str, int]:
     return out, total
 
 
-def find_unredacted_secrets(text: str) -> List[str]:
-    """Return list of rule descriptions if any unredacted secret pattern remains in text."""
+def _matches_raw_secret_rule(text: str, extra_secrets: Optional[Sequence[str]] = None) -> bool:
+    _, cnt = _redact_raw_only(text, extra_secrets=extra_secrets)
+    return cnt > 0
+
+
+def _decode_base64_candidate(tok: str) -> Optional[str]:
+    if "[REDACTED" in tok or tok.startswith("eyJ"):
+        return None
+    if not (re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", tok) or re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", tok)):
+        return None
+    padded = tok + ("=" * ((4 - len(tok) % 4) % 4))
+    for fn in (base64.b64decode, base64.urlsafe_b64decode):
+        try:
+            raw = fn(padded.encode("ascii"))
+        except Exception:
+            continue
+        if len(raw) < 8:
+            continue
+        if all(32 <= b < 127 or b in (9, 10, 13) for b in raw):
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+    return None
+
+
+def redact_secrets(text: str, extra_secrets: Optional[Sequence[str]] = None) -> Tuple[str, int]:
+    """Mask raw, Base64-encoded, URL-encoded, and registered secrets deterministically."""
+    if not text:
+        return text, 0
+    out, total = _redact_raw_only(text, extra_secrets=extra_secrets)
+
+    def _sub_urlenc(match: re.Match[str]) -> str:
+        nonlocal total
+        tok = match.group(0)
+        if "[REDACTED" in tok or not re.search(r"%[0-9A-Fa-f]{2}", tok):
+            return tok
+        dec = urllib.parse.unquote(tok)
+        if dec != tok and _matches_raw_secret_rule(dec, extra_secrets):
+            total += 1
+            return "[REDACTED_URLENC_SECRET]"
+        return tok
+
+    out = _URLENC_CANDIDATE_RE.sub(_sub_urlenc, out)
+
+    def _sub_b64(match: re.Match[str]) -> str:
+        nonlocal total
+        tok = match.group(1)
+        dec = _decode_base64_candidate(tok)
+        if dec and _matches_raw_secret_rule(dec, extra_secrets):
+            total += 1
+            return "[REDACTED_B64_SECRET]"
+        return tok
+
+    out = _B64_CANDIDATE_RE.sub(_sub_b64, out)
+    return out, total
+
+
+def find_unredacted_secrets(text: str, extra_secrets: Optional[Sequence[str]] = None) -> List[str]:
+    """Return list of rule descriptions if any unredacted raw/encoded secret remains in text."""
     findings: List[str] = []
-    scrubbed, count = redact_secrets(text)
+    scrubbed, count = redact_secrets(text, extra_secrets=extra_secrets)
     if count > 0 and scrubbed != text:
+        if extra_secrets:
+            for sec in extra_secrets:
+                if len(sec) >= 6 and sec in text:
+                    findings.append("registered_secret")
         for idx, (pat, _) in enumerate(_REDACT_RULES):
             for m in pat.finditer(text):
-                # Check if rule actually changes the match
-                _, c = redact_secrets(m.group(0))
+                _, c = _redact_raw_only(m.group(0), extra_secrets=extra_secrets)
                 if c > 0:
                     findings.append(f"rule_{idx}: {trunc(m.group(0), 48)}")
                     if len(findings) >= 10:
                         return findings
+        if not findings:
+            findings.append("encoded_secret (base64 or urlencoded)")
     return findings
 
 
@@ -381,12 +484,118 @@ if os.environ.get("VERISEC_OFFLINE") == "1":
 '''
 
 
+NETGUARD_NODE_CODE = r'''"use strict";
+/* VeriSec 100% Outbound Network Isolation Guard for Node.js (loaded via NODE_OPTIONS). */
+if (process.env.VERISEC_OFFLINE === "1") {
+  const net = require("net");
+  const dns = require("dns");
+  const http = require("http");
+  const https = require("https");
+  const ALLOWED = new Set(["127.0.0.1", "localhost", "::1", "0.0.0.0", "::ffff:127.0.0.1", ""]);
+
+  function isAllowedHost(host) {
+    if (!host) return true;
+    const clean = String(host).replace(/^\[|\]$/g, "").split(":")[0].trim().toLowerCase();
+    return ALLOWED.has(clean);
+  }
+
+  function extractSocketHost(args) {
+    if (!args || args.length === 0) return "";
+    const first = Array.isArray(args[0]) ? args[0][0] : args[0];
+    if (first && typeof first === "object") {
+      if (first.path && !first.host && !first.hostname && !first.port) return "127.0.0.1";
+      return String(first.host || first.hostname || "localhost");
+    }
+    if (typeof first === "string") return "127.0.0.1"; // IPC socket path
+    if (typeof first === "number") {
+      const second = Array.isArray(args[0]) ? args[0][1] : args[1];
+      return typeof second === "string" ? second : "localhost";
+    }
+    return "";
+  }
+
+  const origConnect = net.Socket.prototype.connect;
+  net.Socket.prototype.connect = function (...args) {
+    const host = extractSocketHost(args);
+    if (!isAllowedHost(host)) {
+      throw new Error("VERISEC_NET_GUARD: Blocked external Node.js socket connect to " + host);
+    }
+    return origConnect.apply(this, args);
+  };
+
+  const origLookup = dns.lookup;
+  dns.lookup = function (hostname, ...rest) {
+    if (!isAllowedHost(hostname)) {
+      throw new Error("VERISEC_NET_GUARD: Blocked external Node.js DNS lookup for " + hostname);
+    }
+    return origLookup.call(this, hostname, ...rest);
+  };
+
+  for (const fnName of ["resolve", "resolve4", "resolve6"]) {
+    const orig = dns[fnName];
+    if (typeof orig === "function") {
+      dns[fnName] = function (hostname, ...rest) {
+        if (!isAllowedHost(hostname)) {
+          throw new Error("VERISEC_NET_GUARD: Blocked external Node.js DNS " + fnName + " for " + hostname);
+        }
+        return orig.call(this, hostname, ...rest);
+      };
+    }
+  }
+
+  function extractUrlHost(input) {
+    if (!input) return "localhost";
+    if (typeof input === "string") {
+      try { return new URL(input).hostname; } catch { return input; }
+    }
+    if (input instanceof URL) return input.hostname;
+    if (typeof input === "object") return String(input.hostname || input.host || "localhost");
+    return "localhost";
+  }
+
+  for (const mod of [http, https]) {
+    const origReq = mod.request;
+    const origGet = mod.get;
+    mod.request = function (input, ...rest) {
+      const host = extractUrlHost(input);
+      if (!isAllowedHost(host)) {
+        throw new Error("VERISEC_NET_GUARD: Blocked external Node.js HTTP request to " + host);
+      }
+      return origReq.call(this, input, ...rest);
+    };
+    mod.get = function (input, ...rest) {
+      const host = extractUrlHost(input);
+      if (!isAllowedHost(host)) {
+        throw new Error("VERISEC_NET_GUARD: Blocked external Node.js HTTP get to " + host);
+      }
+      return origGet.call(this, input, ...rest);
+    };
+  }
+
+  if (typeof globalThis.fetch === "function") {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async function (input, init) {
+      const urlStr = typeof input === "string" ? input : (input && input.url) || "";
+      const host = extractUrlHost(urlStr);
+      if (!isAllowedHost(host)) {
+        throw new Error("VERISEC_NET_GUARD: Blocked external Node.js fetch to " + host);
+      }
+      return origFetch.call(this, input, init);
+    };
+  }
+}
+'''
+
+
 def ensure_netguard(s_dir: Path) -> Path:
     ng_dir = s_dir / "tmp" / "netguard"
     ng_dir.mkdir(parents=True, exist_ok=True)
     sc_file = ng_dir / "sitecustomize.py"
     if not sc_file.is_file():
         sc_file.write_text(NETGUARD_CODE, encoding="utf-8")
+    js_file = ng_dir / "netguard_node.cjs"
+    if not js_file.is_file():
+        js_file.write_text(NETGUARD_NODE_CODE, encoding="utf-8")
     return ng_dir
 
 
@@ -442,6 +651,11 @@ def build_isolated_env(
         prev_node = env.get("NODE_PATH", "")
         nm = str((target_root / "node_modules").resolve())
         env["NODE_PATH"] = f"{nm}{os.pathsep}{prev_node}" if prev_node else nm
+
+    ng_js = (ng_dir / "netguard_node.cjs").resolve().as_posix()
+    req_opt = f'--require="{ng_js}"' if " " in ng_js else f"--require={ng_js}"
+    prev_node_opts = env.get("NODE_OPTIONS", "").strip()
+    env["NODE_OPTIONS"] = f"{req_opt} {prev_node_opts}".strip()
 
     prev_py = env.get("PYTHONPATH", "")
     if prev_py:
@@ -746,13 +960,14 @@ def cmd_log(args: argparse.Namespace) -> int:
     if not s_dir.is_dir():
         raise SystemExit(f"[vs.py] ERROR: Session directory missing: {s_dir}")
 
+    extra_secrets = _load_registered_secrets(s_dir)
     lines = worklog.read_text(encoding="utf-8", errors="replace").splitlines() if worklog.is_file() else []
     if not lines:
         lines = ["Status: Initialized", "", "# VeriSec Worklog"]
 
     total_redactions = 0
     if args.status:
-        clean_status, rc = redact_secrets(" ".join(args.status.strip().splitlines()))
+        clean_status, rc = redact_secrets(" ".join(args.status.strip().splitlines()), extra_secrets=extra_secrets)
         total_redactions += rc
         new_status = f"Status: {clean_status}"
         if lines[0].startswith("Status:"):
@@ -774,7 +989,7 @@ def cmd_log(args: argparse.Namespace) -> int:
 
     ts = datetime.now().strftime("%H:%M:%S")
     for ent in entries:
-        clean_ent, rc = redact_secrets(ent)
+        clean_ent, rc = redact_secrets(ent, extra_secrets=extra_secrets)
         total_redactions += rc
         prefix = "" if clean_ent.startswith("-") else "- "
         lines.append(f"{prefix}[{ts}] {clean_ent}")
@@ -788,10 +1003,23 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 
 def cmd_redact_output(args: argparse.Namespace) -> int:
+    s_dir: Optional[Path] = None
+    if args.s:
+        _, s_dir, _, _ = resolve_session(args.s, args.root)
+
+    if args.register_secret:
+        if s_dir is None:
+            raise SystemExit("[vs.py] ERROR: --s is required with --register-secret")
+        total_reg = _save_registered_secrets(s_dir, args.register_secret)
+        print(f"[vs redact-output] registered_secrets={total_reg}")
+        if not args.scan and not args.input_file and args.text is None:
+            return 0
+
+    extra_secrets = _load_registered_secrets(s_dir)
+
     if args.scan:
-        if not args.s:
+        if s_dir is None:
             raise SystemExit("[vs.py] ERROR: --s is required with --scan")
-        root, s_dir, _, _ = resolve_session(args.s, args.root)
         targets: List[Path] = []
         for sub in (s_dir / "logs",):
             if sub.is_dir():
@@ -806,12 +1034,12 @@ def cmd_redact_output(args: argparse.Namespace) -> int:
         remaining = 0
         for fp in targets:
             txt = fp.read_text(encoding="utf-8", errors="replace")
-            clean_txt, count = redact_secrets(txt)
+            clean_txt, count = redact_secrets(txt, extra_secrets=extra_secrets)
             if count > 0 and clean_txt != txt:
                 fp.write_text(clean_txt, encoding="utf-8")
                 scrubbed_files += 1
                 total_masked += count
-            if find_unredacted_secrets(clean_txt):
+            if find_unredacted_secrets(clean_txt, extra_secrets=extra_secrets):
                 remaining += 1
 
         status = "CLEAN" if remaining == 0 else "WARNING"
@@ -828,7 +1056,7 @@ def cmd_redact_output(args: argparse.Namespace) -> int:
     else:
         raw = sys.stdin.read()
 
-    clean, count = redact_secrets(raw)
+    clean, count = redact_secrets(raw, extra_secrets=extra_secrets)
     if args.output_file:
         Path(args.output_file).write_text(clean, encoding="utf-8")
         print(f"[vs redact-output] output={args.output_file} redactions={count}")
@@ -1605,7 +1833,13 @@ def _evaluate_poc_output(
         out.harness_signals.append("missing passing control test (test_control_*)")
         out.breach_status = "HARNESS_BROKEN"
     elif (out.failed > 0 or out.errors > 0) and out.ran > 0:
-        out.breach_status = "BREACH_CONFIRMED"
+        if runner in ("unittest", "pytest", "node", "go", "generic") and BREACH_PROOF_MARKER not in raw_clean_redacted:
+            out.harness_signals.append(
+                f"unmarked test failure (missing {BREACH_PROOF_MARKER} marker or VERISEC_POC JSON)"
+            )
+            out.breach_status = "HARNESS_BROKEN"
+        else:
+            out.breach_status = "BREACH_CONFIRMED"
     elif exit_code == 0 and out.failed == 0 and out.errors == 0 and out.ran > 0:
         out.breach_status = "BREACH_BLOCKED"
     else:
@@ -1674,7 +1908,8 @@ def _execute_isolated_poc(
         rc = 126
 
     clean_out = strip_ansi(raw_out)
-    redacted_out, red_count = redact_secrets(clean_out)
+    extra_secrets = _load_registered_secrets(s_dir)
+    redacted_out, red_count = redact_secrets(clean_out, extra_secrets=extra_secrets)
 
     log_file = s_dir / "logs" / f"{target_id}_{phase}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1805,6 +2040,53 @@ def _restore_sandbox_from(root: Path, s_dir: Path, src_dir: Path) -> int:
     return _copy_project_tree(src_dir, fix_dir, global_excl, root_excl)
 
 
+_DB_OR_CACHE_RE = re.compile(
+    r"\b(?:sqlite3|psycopg2?|asyncpg|sqlalchemy|pymongo|redis|aioredis|ioredis|mysql\.connector|"
+    r"prisma|knex|sequelize|typeorm|mongoose|gorm|sqlx|diesel|JdbcTemplate|EntityManager|DbContext)\b|"
+    r"\b(?:SELECT|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b|"
+    r"\.(?:executemany|execute|select_for_update|find_one_and_update)\s*\(",
+    re.I,
+)
+_IN_MEM_LOCK_RE = re.compile(
+    r"\b(?:threading\.(?:Lock|RLock|Semaphore)|asyncio\.Lock|sync\.(?:Mutex|RWMutex)|"
+    r"synchronized|Mutex::new)\b|\bwith\s+\w*lock\b",
+    re.I,
+)
+_ATOMIC_DB_GUARD_RE = re.compile(
+    r"\b(?:FOR\s+UPDATE|select_for_update|BEGIN\s+IMMEDIATE|SERIALIZABLE|find_one_and_update|"
+    r"SETNX|WATCH|rowcount|RETURNING)\b|"
+    r"\bUPDATE\b[\s\S]{0,160}\bWHERE\b[\s\S]{0,120}(?:>=|>|<=|<|remaining|balance|stock|uses|quota)",
+    re.I,
+)
+
+
+def _detect_in_memory_lock_on_db(root: Path, fix_dir: Path) -> Optional[str]:
+    """Reject in-memory process locks when patching DB/cache-backed race handlers."""
+    global_excl, root_excl = _compute_sandbox_exclusions(root, [])
+    base_map = _collect_source_files_for_diff(root, global_excl, root_excl)
+    fix_map = _collect_source_files_for_diff(fix_dir, global_excl, root_excl)
+    for rel in sorted(set(base_map) & set(fix_map)):
+        a_lines = _read_text_lines_for_diff(base_map[rel])
+        b_lines = _read_text_lines_for_diff(fix_map[rel])
+        if not a_lines or not b_lines or a_lines == b_lines:
+            continue
+        full_new = "\n".join(b_lines)
+        if not _DB_OR_CACHE_RE.search(full_new):
+            continue
+        added_lines = [
+            ln[1:]
+            for ln in difflib.unified_diff(a_lines, b_lines, n=0, lineterm="")
+            if ln.startswith("+") and not ln.startswith("+++")
+        ]
+        added_src = "\n".join(added_lines)
+        if _IN_MEM_LOCK_RE.search(added_src) and not _ATOMIC_DB_GUARD_RE.search(added_src):
+            return (
+                f"In-memory lock added to DB/cache-backed file {rel} without atomic DB/row-lock guard "
+                "(unsafe across multi-worker processes; use atomic SQL UPDATE ... WHERE or SELECT ... FOR UPDATE)"
+            )
+    return None
+
+
 def _run_suite_in_sandbox(
     root: Path,
     s_dir: Path,
@@ -1819,6 +2101,7 @@ def _run_suite_in_sandbox(
     tokens = _resolve_bughunt_cmd_paths(parse_cmd_tokens(test_cmd_str), root)
     env = build_isolated_env(s_dir, cache_dir, target_root=fix_dir, phase="remediation")
     resolved = resolve_executable(tokens, cwd, env)
+    extra_secrets = _load_registered_secrets(s_dir)
     try:
         proc = subprocess.run(
             resolved,
@@ -1832,7 +2115,7 @@ def _run_suite_in_sandbox(
             timeout=timeout_s,
         )
         raw = strip_ansi(proc.stdout or "")
-        red_out, red_cnt = redact_secrets(raw)
+        red_out, red_cnt = redact_secrets(raw, extra_secrets=extra_secrets)
         log_path = s_dir / "logs" / f"{tid}_suite.log"
         log_path.write_text(red_out.rstrip() + f"\nexit={proc.returncode}\n", encoding="utf-8")
         if proc.returncode == 0 and "VERISEC_NET_GUARD:" not in red_out:
@@ -1943,9 +2226,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     total_red = int(base_data.get("redactions", 0)) + rem_outcome.redactions + suite_red
 
     # Check secret cleanliness across this target's logs
+    extra_secrets = _load_registered_secrets(s_dir)
     rem_log = (s_dir / "logs" / f"{tid}_remediation.log")
     rem_txt = rem_log.read_text(encoding="utf-8", errors="replace") if rem_log.is_file() else ""
-    unredacted = find_unredacted_secrets(rem_txt)
+    unredacted = find_unredacted_secrets(rem_txt, extra_secrets=extra_secrets)
+
+    in_mem_db_issue: Optional[str] = None
+    if category == "RACE_DOUBLE_SPEND":
+        in_mem_db_issue = _detect_in_memory_lock_on_db(root, s_dir / "sandbox-fix")
 
     if rem_outcome.harness_signals or not rem_outcome.network_isolated:
         verdict = "REJECTED_REMEDIATION_HARNESS"
@@ -1958,6 +2246,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
     elif rem_outcome.breach_status != "BREACH_BLOCKED":
         verdict = "REJECTED_INCOMPLETE_PATCH"
         reason = "Unauthorized/boundary breach still succeeds after patch"
+        gate2_pass = False
+    elif in_mem_db_issue:
+        verdict = "REJECTED_IN_MEMORY_LOCK_ON_DB"
+        reason = in_mem_db_issue
         gate2_pass = False
     elif not suite_ok:
         verdict = "REJECTED_TEST_REGRESSION"
@@ -2134,7 +2426,10 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
             if udiff:
                 file_diffs.append((rel, "\n".join(udiff)))
 
-        full_diff_text, red_cnt = redact_secrets("\n\n".join(d for _, d in file_diffs))
+        full_diff_text, red_cnt = redact_secrets(
+            "\n\n".join(d for _, d in file_diffs),
+            extra_secrets=_load_registered_secrets(s_dir),
+        )
         diff_file = s_dir / "logs" / "sandbox-fix.diff"
         diff_file.write_text(full_diff_text + ("\n" if full_diff_text else ""), encoding="utf-8")
 
@@ -2206,11 +2501,13 @@ def cmd_sandbox(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _extract_redacted_snippet(log_path: Path, max_lines: int = 5) -> str:
+def _extract_redacted_snippet(
+    log_path: Path, max_lines: int = 5, extra_secrets: Optional[Sequence[str]] = None
+) -> str:
     if not log_path.is_file():
         return ""
     raw = log_path.read_text(encoding="utf-8", errors="replace")
-    clean, _ = redact_secrets(strip_ansi(raw))
+    clean, _ = redact_secrets(strip_ansi(raw), extra_secrets=extra_secrets)
     lines = [ln.rstrip() for ln in clean.splitlines() if ln.strip()]
     interesting: List[str] = []
     for ln in lines:
@@ -2315,18 +2612,20 @@ def cmd_summary(args: argparse.Namespace) -> int:
             )
         out.append("")
 
+    extra_secrets = _load_registered_secrets(s_dir)
+
     if args.snippets:
         for d in confirmed + refuted:
             b = d["baseline"]
             base_log = root / b["log_path"] if b.get("log_path") else (logs_dir / f"{d['id']}_baseline.log")
-            snip = _extract_redacted_snippet(base_log, max_lines=4)
+            snip = _extract_redacted_snippet(base_log, max_lines=4, extra_secrets=extra_secrets)
             if snip:
                 out.append(f"**Redacted Snippet `{d['id']}` (Baseline):**")
                 out.append("```text")
                 out.append(snip)
                 out.append("```")
 
-    summary_text, _ = redact_secrets("\n".join(out))
+    summary_text, _ = redact_secrets("\n".join(out), extra_secrets=extra_secrets)
     print(summary_text)
     return 0
 
@@ -2339,7 +2638,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vs.py",
-        description="VeriSec v1.0 CLI: API surface-map, 100% network-isolated PoCs, secret redaction & Dual-Gate verify.",
+        description="VeriSec v1.1 CLI: API surface-map, Python+Node isolated PoCs, raw/encoded redaction & Dual-Gate verify.",
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -2366,12 +2665,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_poc.add_argument("cmd", nargs=argparse.REMAINDER, help="PoC command after --")
     p_poc.set_defaults(func=cmd_isolated_poc)
 
-    p_red = sub.add_parser("redact-output", help="Redact secrets/tokens/passwords from text, file, stdin, or session logs")
+    p_red = sub.add_parser("redact-output", help="Redact raw/Base64/URL-encoded secrets from text, file, stdin, or session logs")
     p_red.add_argument("--text", default=None, help="Inline text to redact")
     p_red.add_argument("--input-file", default=None, help="Input file path")
     p_red.add_argument("--output-file", default=None, help="Output file path")
-    p_red.add_argument("--s", default=None, help="Session directory for --scan")
+    p_red.add_argument("--s", default=None, help="Session directory for --scan or --register-secret")
     p_red.add_argument("--root", default=None, help="Project ROOT override")
+    p_red.add_argument("--register-secret", action="append", default=None, help="Register canary/session secret to mask in raw & encoded forms")
     p_red.add_argument("--scan", action="store_true", help="Scan & scrub all logs/reports inside session S")
     p_red.set_defaults(func=cmd_redact_output)
 

@@ -2,7 +2,7 @@
 
 [![Agent Skills Standard](https://img.shields.io/badge/Agent%20Skills-Compliant-blue.svg)](https://agentskills.io)
 [![CI](https://github.com/lufus4826-eng/verisec/actions/workflows/ci.yml/badge.svg)](https://github.com/lufus4826-eng/verisec/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-1.0.0-purple.svg)](https://github.com/lufus4826-eng/verisec/releases/tag/v1.0.0)
+[![Version](https://img.shields.io/badge/Version-1.1.0-purple.svg)](https://github.com/lufus4826-eng/verisec/releases/tag/v1.1.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Claude%20Code%20%7C%20Antigravity%20%7C%20Cursor%20%7C%20Windsurf-green.svg)](#installation)
 [![OS](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-orange.svg)](#supported-stacks--language-adapters)
@@ -22,15 +22,15 @@ When you ask a traditional scanner or AI coding agent to *"audit security or fix
 3. **Unsafe exploit testing & leaked credentials:** Running ad-hoc exploit scripts can touch external hosts or print raw Bearer tokens, JWTs, and API keys (`sk-live-...`) straight into logs and LLM context.
 4. **Token bloat:** Dumping full HTTP traces and raw test runner logs floods the agent's context window.
 
-**VeriSec (`v1.0.0`) solves all four using a zero-dependency Python CLI engine (`scripts/vs.py`) and strict 2-Layer Dual-Gate verification:**
+**VeriSec (`v1.1.0`) solves all four using a zero-dependency Python CLI engine (`scripts/vs.py`) and strict 2-Layer Dual-Gate verification:**
 - **Gate 1 — Invariant Breach Gate (`isolated-poc --phase baseline` + `verify --gate1-only`):**
   - **Authorized Control Pass:** A legitimate authorized request (`test_control_*`) **must** succeed (`PASS`), proving the route and harness work.
-  - **Boundary Breach Proven:** An unauthorized, cross-account, mass-assigned, or concurrent request breaches the security boundary (`BREACH_CONFIRMED`) on unpatched code. If unpatched code already blocks the breach (`BREACH_BLOCKED`), VeriSec classifies it as **`REFUTED_SAFE`** (zero false positives).
-  - **100% Outbound Network Isolation (`VERISEC_NET_GUARD`):** Injects a socket/DNS guard (`sitecustomize.py`), sets `VERISEC_OFFLINE=1`, and blackholes proxy variables so PoCs never connect outside loopback (`127.0.0.1` / `localhost` / `::1`).
+  - **Explicit Breach Proof (`VERISEC_BREACH_PROVEN` / `VERISEC_POC:`):** An unauthorized, cross-account, mass-assigned, or concurrent request must prove a boundary breach either via `VERISEC_POC:` JSON (`"breach_detected":true`) or an invariant failure tagged with `VERISEC_BREACH_PROVEN`. Unmarked accidental test failures are rejected as `HARNESS_BROKEN`, and already-guarded baseline endpoints resolve to **`REFUTED_SAFE`** (zero false positives).
+  - **Dual-Runtime Network Isolation (`VERISEC_NET_GUARD` for Python & Node.js):** Injects both Python's `sitecustomize.py` (`PYTHONPATH`) and Node.js's `netguard_node.cjs` (`NODE_OPTIONS=--require`), blocking non-loopback sockets, DNS lookups, `http`/`https`, and `fetch` while allowing `127.0.0.1` / `localhost` / `::1` and Unix IPC sockets (alongside `GOPROXY=off`, `CARGO_NET_OFFLINE=true`, `npm_config_offline=true`, and blackholed proxy vars for compiled stacks).
 - **Gate 2 — Remediation & Non-Regression Gate (`verify --auto-rollback` on `S/sandbox-fix/`):**
   - **Breach Blocked:** Re-running the identical PoC against `S/sandbox-fix/` proves the unauthorized action is blocked (`BREACH_BLOCKED`).
-  - **100% Functional & Suite Preservation:** Both the PoC's `Authorized Control` request **and** the project's existing test suite (`--test-cmd`) pass 100%. Overly strict patches (`REJECTED_CONTROL_BROKEN`) or regressive patches (`REJECTED_TEST_REGRESSION`) are **rolled back byte-for-byte automatically**.
-  - **Automatic Secret Redaction (`redact-output`):** Masks `Authorization` headers, JWTs (`eyJ...`), API keys (`sk-`, `ghp_`, `AKIA`, `AIza`, `xox...`), PEM private keys, connection string credentials, and key-value secrets across logs, diffs, worklogs, and reports (`unredacted_remaining=0`).
+  - **100% Functional & Multi-Worker Safe Preservation:** Both the PoC's `Authorized Control` request **and** the project's existing test suite (`--test-cmd`) pass 100%. Overly strict patches (`REJECTED_CONTROL_BROKEN`), test regressions (`REJECTED_TEST_REGRESSION`), and unsafe in-memory locks added to DB/ORM/Redis-backed race handlers (`REJECTED_IN_MEMORY_LOCK_ON_DB` — enforcing atomic `UPDATE ... WHERE` or `SELECT ... FOR UPDATE`) are **rolled back byte-for-byte automatically**.
+  - **Raw, Encoded & Canary Secret Redaction (`redact-output`):** Masks `Authorization` headers, JWTs (`eyJ...`), API keys (`sk-`, `ghp_`, `AKIA`, `AIza`, `xox...`), PEM keys, DB credential URLs, key-value secrets, **Base64-encoded secrets**, **URL-encoded secrets**, and **session-registered canary secrets** (`--register-secret`) across logs, diffs, worklogs, and reports (`unredacted_remaining=0`).
 
 ---
 
@@ -134,17 +134,17 @@ flowchart TD
 
 | Subcommand | Description |
 |---|---|
-| `init [--root .]` | Creates `.bughunt/sec-<YYYYMMDD-HHMMSS>/{pocs,logs,tmp}` + `.cache`, writes `tmp/netguard/sitecustomize.py`, snapshots `fs-before.txt`, initializes `worklog.md`, and emits 1-line JSON. |
+| `init [--root .]` | Creates `.bughunt/sec-<YYYYMMDD-HHMMSS>/{pocs,logs,tmp}` + `.cache`, writes Python + Node.js netguards (`sitecustomize.py`, `netguard_node.cjs`), snapshots `fs-before.txt`, initializes `worklog.md`, and emits 1-line JSON. |
 | `surface-map [--root .] [--scope dir] [--s S]` | Runs Python AST (excluding comments/docstrings) + multi-language scanning for `IDOR_BOLA`, `MISSING_AUTH_GUARD`, `MASS_ASSIGNMENT`, and `RACE_DOUBLE_SPEND`, printing a ranked `<=35`-line Auth Matrix. |
-| `isolated-poc --s S --id ID --phase baseline\|remediation --category CAT -- <cmd>` | Runs PoCs under `VERISEC_OFFLINE=1` with `VERISEC_NET_GUARD` socket/DNS isolation, automatic secret redaction, `VERISEC_POC:` JSON or test runner parsing, and a `<=10`-line digest. |
-| `redact-output (--text STR \| --input-file PATH \| --s S --scan)` | Scrubs Bearer/Basic headers, JWTs, `sk-`/`ghp_`/`AKIA`/`AIza` keys, PEM keys, DB URLs, and key-value secrets; `--scan` verifies `unredacted_remaining=0` across all session logs and reports. |
-| `verify --s S --id ID [--gate1-only] [--auto-rollback] [--test-cmd "..."]` | Enforces Gate 1 (`BREACH_CONFIRMED` vs `REFUTED_SAFE`) and Gate 2 (`BREACH_BLOCKED` + Control `PASS` + project suite `PASS` + `0` secret leaks), auto-restoring checkpoints on rejection. |
+| `isolated-poc --s S --id ID --phase baseline\|remediation --category CAT -- <cmd>` | Runs PoCs under `VERISEC_OFFLINE=1` with Python+Node.js socket/DNS/HTTP guards, automatic raw+Base64+URL-encoded secret redaction, `VERISEC_POC:` JSON or `VERISEC_BREACH_PROVEN`-tagged runner parsing, and a `<=10`-line digest. |
+| `redact-output (--text STR \| --input-file PATH \| --s S --register-secret VAL \| --s S --scan)` | Scrubs Bearer/Basic headers, JWTs, API keys, PEM keys, DB URLs, Base64/URL-encoded secrets, and registered canary secrets; `--scan` verifies `unredacted_remaining=0` across all session logs and reports. |
+| `verify --s S --id ID [--gate1-only] [--auto-rollback] [--test-cmd "..."]` | Enforces Gate 1 (`BREACH_CONFIRMED` vs `REFUTED_SAFE`) and Gate 2 (`BREACH_BLOCKED` + Control `PASS` + project suite `PASS` + rejects in-memory locks on DB-backed races + `0` secret leaks), auto-restoring checkpoints on rejection. |
 | `sandbox --s S --mode create\|fix\|save\|rollback\|diff\|clean [--id ID]` | Manages `S/sandbox-fix/`, per-target checkpoints (`save`/`rollback`), secret-redacted unified diffs (`<=8,000` chars), and host cleanliness verification (`fs-before.txt` vs `fs-after.txt`). |
 | `log --s S [--status "..."] [--entry "..."]` | Atomically updates `Status:` on line 1 of `S/worklog.md` and appends redacted timestamped 1-line entries. |
 | `summary --s S [--snippets]` | Emits redacted Markdown Dual-Gate tables and compact PoC evidence snippets from session JSON logs without reading raw logs. |
 
 ### Supported PoC Protocols
-1. **Standard Test Runner Mode (`unittest` / `pytest` / `node:test` / `go test`):** Include at least one passing positive control test named `test_control_*` (or `Control_*`) and security invariant test(s) (`test_unauthorized_*`, `test_idor_*`, `test_mass_assignment_*`, `test_race_*`). Failing the invariant on unpatched code while `test_control_*` passes proves `BREACH_CONFIRMED`; passing both after patching proves `BREACH_BLOCKED`.
+1. **Standard Test Runner Mode (`unittest` / `pytest` / `node:test` / `go test`):** Include at least one passing positive control test named `test_control_*` (or `Control_*`) and security invariant test(s) (`test_unauthorized_*`, `test_idor_*`, `test_mass_assignment_*`, `test_race_*`) whose failure message includes **`VERISEC_BREACH_PROVEN:`** (unmarked test errors are rejected as `HARNESS_BROKEN`).
 2. **Structured JSON Mode (`VERISEC_POC:`):** Print a single line to stdout:
 ```text
 VERISEC_POC:{"id":"sec1","category":"IDOR_BOLA","control_authorized":"PASS","breach_detected":true,"network_isolated":true,"details":"User B read User A invoice INV-101"}
@@ -156,12 +156,12 @@ VERISEC_POC:{"id":"sec1","category":"IDOR_BOLA","control_authorized":"PASS","bre
 
 | Language | PoC Harness & Isolation Strategy | Concurrency / Race Primitive |
 |---|---|---|
-| **Python** | `VERISEC_TARGET_ROOT` + `PYTHONPATH` + `sitecustomize.py` socket guard (`unittest` / `pytest`) | `threading.Barrier(N)` |
-| **Node.js / TS** | `pathToFileURL(VERISEC_TARGET_ROOT)` dynamic `import()` (`node:test` / `jest` / `vitest`), `npm_config_offline=true` | `Promise.all(...)` |
-| **Go** | `S/sandbox-fix/`, `net/http/httptest.NewRecorder`, `go test -race`, `GOPROXY=off` | `sync.WaitGroup` + `chan struct{}` |
-| **Java / Kotlin (JVM)** | `S/sandbox-fix/`, `MockMvc`, `mvn -o test` / `gradle --offline test` | `CyclicBarrier(N)` |
-| **C# (.NET)** | `S/sandbox-fix/`, `WebApplicationFactory` / `TestServer`, `dotnet test --no-restore` | `CountdownEvent(N)` / `Task.WhenAll` |
-| **Rust** | `S/sandbox-fix/`, `oneshot` / `call_service`, `cargo test --offline`, `CARGO_NET_OFFLINE=true` | `std::sync::Barrier` / `tokio::sync::Barrier` |
+| **Python** | `VERISEC_TARGET_ROOT` + `PYTHONPATH` + `sitecustomize.py` socket/DNS guard (`unittest` / `pytest`) | `threading.Barrier(N)` (or atomic SQL on DB) |
+| **Node.js / TS** | `NODE_OPTIONS=--require netguard_node.cjs` (`net`/`dns`/`http`/`https`/`fetch` guard) + `pathToFileURL(VERISEC_TARGET_ROOT)` (`node:test` / `jest` / `vitest`) | `Promise.all(...)` |
+| **Go** | `S/sandbox-fix/`, `net/http/httptest.NewRecorder` (in-process), `go test -race`, `GOPROXY=off`, blackholed proxy vars | `sync.WaitGroup` + `chan struct{}` |
+| **Java / Kotlin (JVM)** | `S/sandbox-fix/`, `MockMvc` (in-process), `mvn -o test` / `gradle --offline test`, blackholed proxy vars | `CyclicBarrier(N)` |
+| **C# (.NET)** | `S/sandbox-fix/`, `WebApplicationFactory` / `TestServer` (in-process), `dotnet test --no-restore`, blackholed proxy vars | `CountdownEvent(N)` / `Task.WhenAll` |
+| **Rust** | `S/sandbox-fix/`, `oneshot` / `call_service` (in-process), `cargo test --offline`, `CARGO_NET_OFFLINE=true`, blackholed proxy vars | `std::sync::Barrier` / `tokio::sync::Barrier` |
 
 ---
 
@@ -175,9 +175,9 @@ verisec/
 ├── CONTRIBUTING.md                   # Contributor & security adapter authoring guide
 ├── LICENSE                           # MIT License
 ├── scripts/
-│   └── vs.py                         # Zero-dependency stdlib Python CLI engine (v1.0)
+│   └── vs.py                         # Zero-dependency stdlib Python CLI engine (v1.1)
 ├── tests/
-│   └── test_vs_cli.py                # 8-suite cross-platform unit & integration tests
+│   └── test_vs_cli.py                # 12-suite cross-platform unit & integration tests
 ├── examples/
 │   └── vault_api_demo/               # 1-command runnable E2E showcase + sample-sec-report.md
 └── resources/

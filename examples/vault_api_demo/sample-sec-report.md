@@ -18,7 +18,7 @@ GUARDED(20) | SAFE_CANDIDATE | vault_app/store.py:22 (create_default_store) | au
 
 ## 2. Dual-Gate Verification Summary & Redacted Snippets (`vs.py summary --snippets`)
 
-### VeriSec Security Summary (`sec-20261118-090047`)
+### VeriSec Security Summary (`sec-20261118-091729`)
 - **Surface Endpoints:** 7 (Flagged: 4) | **Confirmed & Remediated:** 4 | **Refuted Safe:** 1 | **Auto-Rolled-Back Patch Attempts:** 1 | **Secrets Masked:** 2
 
 #### Confirmed & Remediated Vulnerabilities (Dual-Gate Verified)
@@ -38,28 +38,28 @@ GUARDED(20) | SAFE_CANDIDATE | vault_app/store.py:22 (create_default_store) | au
 **Redacted Snippet `sec1` (Baseline):**
 ```text
 FAIL: test_unauthorized_bob_cannot_read_alice_invoice (__main__.TestSec1Idor.test_unauthorized_bob_cannot_read_alice_invoice)
-AssertionError: IDOR breach! Bob read Alice invoice with secret: {'id': 'INV-101', 'owner_id': 'user-a', 'amount': 2400.0, 'api_token': 'sk-live-[REDACTED_KEY]'}
+AssertionError: VERISEC_BREACH_PROVEN: Bob read Alice invoice with secret: {'id': 'INV-101', 'owner_id': 'user-a', 'amount': 2400.0, 'api_token': 'sk-live-[REDACTED_KEY]'}
 FAILED (failures=1)
 exit=1
 ```
 **Redacted Snippet `sec2` (Baseline):**
 ```text
 FAIL: test_unauthorized_member_and_anon_cannot_export (__main__.TestSec2MissingAuth.test_unauthorized_member_and_anon_cannot_export)
-with self.assertRaises(PermissionError):
-AssertionError: PermissionError not raised
+with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: non-admin/anon exported ledgers"):
+AssertionError: PermissionError not raised : VERISEC_BREACH_PROVEN: non-admin/anon exported ledgers
 FAILED (failures=1)
 ```
 **Redacted Snippet `sec3` (Baseline):**
 ```text
 FAIL: test_unauthorized_mass_assignment_role_escalation_blocked (__main__.TestSec3MassAssignment.test_unauthorized_mass_assignment_role_escalation_blocked)
-AssertionError: 'admin' == 'admin' : Mass Assignment escalated role to admin!
+AssertionError: 'admin' == 'admin' : VERISEC_BREACH_PROVEN: Mass Assignment escalated role to admin!
 FAILED (failures=1)
 exit=1
 ```
 **Redacted Snippet `sec4` (Baseline):**
 ```text
 FAIL: test_unauthorized_concurrent_double_spend_blocked (__main__.TestSec4RaceDoubleSpend.test_unauthorized_concurrent_double_spend_blocked)
-AssertionError: 8 != 1 : Double-spend! Redeemed 8 times on 1-use voucher
+AssertionError: 8 != 1 : VERISEC_BREACH_PROVEN: Double-spend! Redeemed 8 times on 1-use voucher
 FAILED (failures=1)
 exit=1
 ```
@@ -71,7 +71,7 @@ exit=0
 ## 3. Sandbox-Verified Remediation Diff (`vs.py sandbox --mode diff`)
 
 ```diff
-[vs sandbox diff] files_changed=1 redactions=0 saved=.bughunt/sec-20261118-090047/logs/sandbox-fix.diff
+[vs sandbox diff] files_changed=1 redactions=0 saved=.bughunt/sec-20261118-091729/logs/sandbox-fix.diff
 --- a/vault_app/routes.py
 +++ b/vault_app/routes.py
 @@ -1,3 +1,3 @@

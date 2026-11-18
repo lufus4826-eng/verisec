@@ -242,7 +242,7 @@ class TestVuln(unittest.TestCase):
     def test_control_owner(self):
         self.assertEqual(svc.read_doc_vuln("alice", "D1")["owner"], "alice")
     def test_unauthorized_idor(self):
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: bob read alice doc"):
             svc.read_doc_vuln("bob", "D1")
 if __name__ == "__main__":
     unittest.main(verbosity=2)
@@ -319,7 +319,7 @@ class TestMass(unittest.TestCase):
         self.assertEqual(res["display_name"], "Alice B.")
         self.assertEqual(res["bio"], "Staff")
     def test_unauthorized_mass_assignment_role_blocked(self):
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: role field was accepted"):
             profile.update_profile("alice", {"display_name": "Mallory", "role": "admin"})
 if __name__ == "__main__":
     unittest.main(verbosity=2)
@@ -479,6 +479,261 @@ print("VERISEC_POC:" + json.dumps({
         p_clean = run_vs(["sandbox", "--s", str(s_dir), "--mode", "clean"], cwd=self.tmp_dir)
         self.assertEqual(p_clean.returncode, 0, p_clean.stdout)
         self.assertIn("cleanliness: CLEAN", p_clean.stdout)
+
+    def test_nodejs_netguard_blocks_external_socket(self) -> None:
+        node_exe = shutil.which("node")
+        if not node_exe:
+            self.skipTest("node not installed on PATH")
+        s_dir = self._init_session()
+        poc_js = s_dir / "pocs" / "poc_node_net.mjs"
+        poc_js.write_text(
+            '''import test from "node:test";
+import assert from "node:assert/strict";
+import net from "node:net";
+
+test("test_control_loopback_allowed", async () => {
+  const srv = net.createServer((c) => c.end());
+  await new Promise((res) => srv.listen(0, "127.0.0.1", res));
+  const port = srv.address().port;
+  await new Promise((res, rej) => {
+    const cli = net.createConnection({ host: "127.0.0.1", port }, () => { cli.end(); res(); });
+    cli.on("error", rej);
+  });
+  srv.close();
+});
+
+test("test_unauthorized_external_node_socket_blocked", async () => {
+  await assert.rejects(
+    async () => {
+      net.createConnection({ host: "8.8.8.8", port: 53 });
+    },
+    /VERISEC_NET_GUARD/
+  );
+  // Also trigger unhandled VERISEC_NET_GUARD to ensure vs.py catches any unguarded external attempt
+  net.createConnection({ host: "8.8.8.8", port: 53 });
+});
+''',
+            encoding="utf-8",
+        )
+        proc = run_vs(
+            ["isolated-poc", "--s", str(s_dir), "--id", "node_net", "--phase", "baseline", "--", node_exe, "--test", str(poc_js)],
+            cwd=self.tmp_dir,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("VIOLATION DETECTED", proc.stdout)
+        self.assertIn("HARNESS_BROKEN", proc.stdout)
+
+    def test_ambiguous_failure_trap_rejected(self) -> None:
+        (self.tmp_dir / "app_trap.py").write_text("def check(): return 'ok'\n", encoding="utf-8")
+        s_dir = self._init_session()
+        poc_bad = s_dir / "pocs" / "poc_ambig.py"
+        poc_bad.write_text(
+            '''import os, sys, unittest
+sys.path.insert(0, os.environ["VERISEC_TARGET_ROOT"])
+import app_trap
+class TestAmbig(unittest.TestCase):
+    def test_control_ok(self):
+        self.assertEqual(app_trap.check(), "ok")
+    def test_unauthorized_accidental_failure(self):
+        self.assertEqual(1, 2, "unrelated test bug without proof marker")
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+''',
+            encoding="utf-8",
+        )
+        p_bad = run_vs(["isolated-poc", "--s", str(s_dir), "--id", "ambig1", "--phase", "baseline", "--", sys.executable, str(poc_bad)], cwd=self.tmp_dir)
+        self.assertEqual(p_bad.returncode, 2, p_bad.stdout)
+        self.assertIn("HARNESS_BROKEN", p_bad.stdout)
+        self.assertIn("VERISEC_BREACH_PROVEN", p_bad.stdout)
+        v_bad = run_vs(["verify", "--s", str(s_dir), "--id", "ambig1", "--gate1-only"], cwd=self.tmp_dir)
+        self.assertNotEqual(v_bad.returncode, 0)
+        self.assertIn("REJECTED_GATE1_HARNESS", v_bad.stdout)
+
+    def test_encoded_and_registered_secret_redaction(self) -> None:
+        import base64
+        import urllib.parse
+
+        s_dir = self._init_session()
+        canary = "CanaryToken_X99_Secret"
+        reg_p = run_vs(["redact-output", "--s", str(s_dir), "--register-secret", canary], cwd=self.tmp_dir)
+        self.assertEqual(reg_p.returncode, 0, reg_p.stdout + reg_p.stderr)
+
+        raw_key = "sk-live-9876543210abcdef123456"
+        raw_db = "postgres://admin:P4ssword!99@db.internal/prod"
+        b64_key = base64.b64encode(raw_key.encode("utf-8")).decode("ascii")
+        b64_canary = base64.b64encode(canary.encode("utf-8")).decode("ascii")
+        url_db = urllib.parse.quote(raw_db, safe="")
+        url_canary = urllib.parse.quote(canary, safe="")
+
+        poc_leak = s_dir / "pocs" / "poc_enc_leak.py"
+        poc_leak.write_text(
+            f'''import json
+print("VERISEC_POC:" + json.dumps({{
+    "id": "enc1",
+    "category": "IDOR_BOLA",
+    "control_authorized": "PASS",
+    "breach_detected": True,
+    "network_isolated": True,
+    "details": "b64={b64_key} b64c={b64_canary} url={url_db} rawc={canary} urlc={url_canary}"
+}}))
+''',
+            encoding="utf-8",
+        )
+        p_run = run_vs(["isolated-poc", "--s", str(s_dir), "--id", "enc1", "--phase", "baseline", "--", sys.executable, str(poc_leak)], cwd=self.tmp_dir)
+        self.assertEqual(p_run.returncode, 0, p_run.stdout + p_run.stderr)
+        for hidden in (b64_key, b64_canary, url_db, canary, url_canary):
+            self.assertNotIn(hidden, p_run.stdout)
+        log_txt = (s_dir / "logs" / "enc1_baseline.log").read_text(encoding="utf-8")
+        for hidden in (b64_key, b64_canary, url_db, canary, url_canary):
+            self.assertNotIn(hidden, log_txt)
+        self.assertIn("[REDACTED_B64_SECRET]", log_txt)
+        self.assertIn("[REDACTED_URLENC_SECRET]", log_txt)
+        self.assertIn("[REDACTED_CUSTOM_SECRET]", log_txt)
+
+        p_scan = run_vs(["redact-output", "--s", str(s_dir), "--scan"], cwd=self.tmp_dir)
+        self.assertEqual(p_scan.returncode, 0, p_scan.stdout)
+        self.assertIn("unredacted_remaining=0 status=CLEAN", p_scan.stdout)
+
+    def test_db_race_rejects_in_memory_lock(self) -> None:
+        (self.tmp_dir / "db_voucher.py").write_text(
+            '''import sqlite3, time
+
+def init_db(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS vouchers (code TEXT PRIMARY KEY, remaining INTEGER)")
+    conn.execute("DELETE FROM vouchers")
+    conn.execute("INSERT INTO vouchers (code, remaining) VALUES ('PROMO-DB', 1)")
+    conn.commit()
+    conn.close()
+
+def redeem_db_voucher(db_path, code):
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    cur = conn.cursor()
+    row = cur.execute("SELECT remaining FROM vouchers WHERE code = ?", (code,)).fetchone()
+    if row and row[0] > 0:
+        time.sleep(0.02)
+        cur.execute("UPDATE vouchers SET remaining = ? WHERE code = ?", (row[0] - 1, code))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    raise ValueError("already redeemed")
+''',
+            encoding="utf-8",
+        )
+        s_dir = self._init_session()
+        poc_db = s_dir / "pocs" / "poc_db_race.py"
+        poc_db.write_text(
+            '''import os, sys, tempfile, threading, unittest
+from pathlib import Path
+sys.path.insert(0, os.environ["VERISEC_TARGET_ROOT"])
+import db_voucher
+
+class TestDbRace(unittest.TestCase):
+    def test_control_single_redeem(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "v.db")
+            db_voucher.init_db(db)
+            self.assertTrue(db_voucher.redeem_db_voucher(db, "PROMO-DB"))
+            with self.assertRaises(ValueError):
+                db_voucher.redeem_db_voucher(db, "PROMO-DB")
+
+    def test_unauthorized_concurrent_db_double_spend_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = str(Path(td) / "v.db")
+            db_voucher.init_db(db)
+            workers = 6
+            barrier = threading.Barrier(workers)
+            ok = []
+            lock = threading.Lock()
+            def worker():
+                barrier.wait(timeout=5)
+                try:
+                    db_voucher.redeem_db_voucher(db, "PROMO-DB")
+                    with lock:
+                        ok.append(1)
+                except Exception:
+                    pass
+            threads = [threading.Thread(target=worker) for _ in range(workers)]
+            for t in threads: t.start()
+            for t in threads: t.join(timeout=5)
+            self.assertEqual(len(ok), 1, f"VERISEC_BREACH_PROVEN: DB double-spend {len(ok)} != 1")
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+''',
+            encoding="utf-8",
+        )
+        run_vs(["isolated-poc", "--s", str(s_dir), "--id", "db_race", "--phase", "baseline", "--category", "RACE_DOUBLE_SPEND", "--", sys.executable, str(poc_db)], cwd=self.tmp_dir)
+        run_vs(["sandbox", "--s", str(s_dir), "--mode", "fix"], cwd=self.tmp_dir)
+        run_vs(["sandbox", "--s", str(s_dir), "--mode", "save", "--id", "db_race"], cwd=self.tmp_dir)
+
+        fix_db = s_dir / "sandbox-fix" / "db_voucher.py"
+        orig_bytes = fix_db.read_bytes()
+
+        # Attempt 1: Patch with in-memory threading.Lock on sqlite3 DB -> MUST BE REJECTED_IN_MEMORY_LOCK_ON_DB!
+        fix_db.write_text(
+            '''import sqlite3, threading, time
+_MEM_LOCK = threading.Lock()
+
+def init_db(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS vouchers (code TEXT PRIMARY KEY, remaining INTEGER)")
+    conn.execute("DELETE FROM vouchers")
+    conn.execute("INSERT INTO vouchers (code, remaining) VALUES ('PROMO-DB', 1)")
+    conn.commit()
+    conn.close()
+
+def redeem_db_voucher(db_path, code):
+    with _MEM_LOCK:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        cur = conn.cursor()
+        row = cur.execute("SELECT remaining FROM vouchers WHERE code = ?", (code,)).fetchone()
+        if row and row[0] > 0:
+            time.sleep(0.02)
+            cur.execute("UPDATE vouchers SET remaining = ? WHERE code = ?", (row[0] - 1, code))
+            conn.commit()
+            conn.close()
+            return True
+        conn.close()
+        raise ValueError("already redeemed")
+''',
+            encoding="utf-8",
+        )
+        v_mem = run_vs(["verify", "--s", str(s_dir), "--id", "db_race", "--auto-rollback"], cwd=self.tmp_dir)
+        self.assertNotEqual(v_mem.returncode, 0)
+        self.assertIn("REJECTED_IN_MEMORY_LOCK_ON_DB", v_mem.stdout)
+        self.assertIn("AUTO_RESTORED", v_mem.stdout)
+        self.assertEqual(fix_db.read_bytes(), orig_bytes)
+
+        # Attempt 2: Patch with atomic SQL UPDATE ... WHERE remaining > 0 -> CONFIRMED_REMEDIATED
+        fix_db.write_text(
+            '''import sqlite3
+
+def init_db(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS vouchers (code TEXT PRIMARY KEY, remaining INTEGER)")
+    conn.execute("DELETE FROM vouchers")
+    conn.execute("INSERT INTO vouchers (code, remaining) VALUES ('PROMO-DB', 1)")
+    conn.commit()
+    conn.close()
+
+def redeem_db_voucher(db_path, code):
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    cur = conn.cursor()
+    cur.execute("UPDATE vouchers SET remaining = remaining - 1 WHERE code = ? AND remaining > 0", (code,))
+    updated = cur.rowcount
+    conn.commit()
+    conn.close()
+    if updated == 1:
+        return True
+    raise ValueError("already redeemed")
+''',
+            encoding="utf-8",
+        )
+        v_sql = run_vs(["verify", "--s", str(s_dir), "--id", "db_race", "--auto-rollback"], cwd=self.tmp_dir)
+        self.assertEqual(v_sql.returncode, 0, v_sql.stdout + v_sql.stderr)
+        self.assertIn("CONFIRMED_REMEDIATED", v_sql.stdout)
 
 
 if __name__ == "__main__":

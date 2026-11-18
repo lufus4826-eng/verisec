@@ -42,7 +42,7 @@ class TestSec1Idor(unittest.TestCase):
             leaked = routes.get_invoice(self.store, self.bob, "INV-101")
         except PermissionError:
             return
-        self.fail(f"IDOR breach! Bob read Alice invoice with secret: {leaked}")
+        self.fail(f"VERISEC_BREACH_PROVEN: Bob read Alice invoice with secret: {leaked}")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
@@ -67,9 +67,9 @@ class TestSec2MissingAuth(unittest.TestCase):
         self.assertEqual(len(rows), 2)
 
     def test_unauthorized_member_and_anon_cannot_export(self):
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: non-admin/anon exported ledgers"):
             routes.export_all_ledgers(self.store, self.member)
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: anonymous exported ledgers"):
             routes.export_all_ledgers(self.store, None)
 
 if __name__ == "__main__":
@@ -103,7 +103,7 @@ class TestSec3MassAssignment(unittest.TestCase):
             )
         except PermissionError:
             return
-        self.assertNotEqual(updated["role"], "admin", "Mass Assignment escalated role to admin!")
+        self.assertNotEqual(updated["role"], "admin", "VERISEC_BREACH_PROVEN: Mass Assignment escalated role to admin!")
         self.assertEqual(updated["credit_limit"], 1000)
 
 if __name__ == "__main__":
@@ -146,7 +146,7 @@ class TestSec4RaceDoubleSpend(unittest.TestCase):
         threads = [threading.Thread(target=worker) for _ in range(workers)]
         for t in threads: t.start()
         for t in threads: t.join(timeout=5)
-        self.assertEqual(len(successes), 1, f"Double-spend! Redeemed {len(successes)} times on 1-use voucher")
+        self.assertEqual(len(successes), 1, f"VERISEC_BREACH_PROVEN: Double-spend! Redeemed {len(successes)} times on 1-use voucher")
         self.assertEqual(store.users["user-a"]["balance"], 200.0)
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ class TestSec1IdorBola(unittest.TestCase):
         self.assertEqual(inv["owner_id"], "user-a")
 
     def test_unauthorized_cross_account_idor_blocked(self):
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(PermissionError, msg="VERISEC_BREACH_PROVEN: cross-account invoice read"):
             get_invoice(self.store, self.bob, "INV-101")
 
 if __name__ == "__main__":
