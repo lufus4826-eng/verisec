@@ -1,0 +1,40 @@
+# VeriSec session logs & sandbox directories
+.bughunt/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node caches
+node_modules/
+.eslintcache
+
+# Compiled / Build artifacts
+target/
+build/
+bin/
+obj/
+*.class
+*.jar
+vendor/
+
+# Test & coverage results
+*.log
+coverage/
+.coverage
+TestResults/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor settings
+.idea/
+.vscode/
+*.swp
+*.swo

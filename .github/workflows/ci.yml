@@ -1,0 +1,34 @@
+name: VeriSec CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Test & Demo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify CLI help
+        run: python -B scripts/vs.py --help
+
+      - name: Run unit & integration suite
+        run: python -B tests/test_vs_cli.py
+
+      - name: Run 1-command vault_api_demo showcase
+        run: python -B examples/vault_api_demo/run_demo.py
