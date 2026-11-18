@@ -213,14 +213,19 @@ verisec/
 
 ---
 
-## VeriHunt Ecosystem
+## Veri-Suite Ecosystem
 
-VeriSec is part of the **VeriHunt Ecosystem**, sharing the `.bughunt/` isolation convention and empirical Dual-Gate philosophy:
-- **[VeriPilot (VeriHunt Suite)](https://github.com/lufus4826-eng/veripilot):** Smart Router, Cumulative Overlay Orchestrator & One-Command Suite Installer (AI Coding Agent Skills Orchestrator).
-- **[VeriPR](https://github.com/lufus4826-eng/veripr):** Daily 1–2 minute pre-commit & PR differential verification (1-hop caller `impact-map`, `Base` vs. `Head` worktree checks, recursive `schema_hash`).
-- **[VeriHunt](https://github.com/lufus4826-eng/verihunt):** General correctness, edge-case, and concurrency defect hunting (`FAIL` -> `PASS` in `sandbox-fix`).
-- **[VeriPerf](https://github.com/lufus4826-eng/veriperf):** Statistical profiling (`p50`/`p95`, Peak Memory, `ABBA` interleaving, `>= 15%` speedup Dual Gate).
-- **[VeriSec](https://github.com/lufus4826-eng/verisec):** Business-logic & authorization security auditing (`surface-map`, 100% network-isolated PoCs, secret redaction, Dual-Gate remediation verification).
+[![Browse Veri-Suite](https://img.shields.io/badge/Catalog-Browse%20Only%20Veri--Suite%20(5)-2ea44f.svg)](https://github.com/lufus4826-eng?tab=repositories&q=topic%3Averi-suite)
+
+VeriSec is part of the **Veri-Suite Ecosystem**, sharing the `.bughunt/` isolation convention and empirical Dual-Gate verification philosophy:
+
+| Skill | Role in Causal Chain | Pinned Release | Repository |
+|---|---|---|---|
+| **VeriPilot** | Hub, Smart Router, Cumulative Overlay & 1-Command Installer | `v1.0.1` | [`lufus4826-eng/veripilot`](https://github.com/lufus4826-eng/veripilot) |
+| **VeriPR** | Stage 1a: Pre-Commit & PR Differential Guard (`1-hop` ripple + `schema_hash`) | `v1.1.0` | [`lufus4826-eng/veripr`](https://github.com/lufus4826-eng/veripr) |
+| **VeriHunt** | Stage 1b: Deep Evidence-Based Bug Hunting & Sandbox Verifier | `v2.1.0` | [`lufus4826-eng/verihunt`](https://github.com/lufus4826-eng/verihunt) |
+| **VeriSec** *(Current Repo)* | Stage 2: Defensive AppSec, Authz Invariant & Air-Gapped PoC Verifier | `v1.1.0` | [`lufus4826-eng/verisec`](https://github.com/lufus4826-eng/verisec) |
+| **VeriPerf** | Stage 3: Statistical Profiling (`p50`/`p95`, Peak RAM, `ABBA` Interleaving) | `v1.1.1` | [`lufus4826-eng/veriperf`](https://github.com/lufus4826-eng/veriperf) |
 
 ---
 
